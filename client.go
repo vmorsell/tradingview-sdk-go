@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"regexp"
 
+	"github.com/vmorsell/tradingview-sdk-go/chart"
 	"github.com/vmorsell/tradingview-sdk-go/internal/protocol"
 	"github.com/vmorsell/tradingview-sdk-go/internal/wire"
 	"github.com/vmorsell/tradingview-sdk-go/quote"
@@ -146,6 +147,11 @@ func (c *Client) Unregister(sessionID string) { c.registry.Unregister(sessionID)
 // NewQuoteSession opens a new quote session multiplexed on this client.
 func (c *Client) NewQuoteSession(opts ...quote.Option) (*quote.Session, error) {
 	return quote.New(c, opts...)
+}
+
+// NewChartSession opens a new chart session multiplexed on this client.
+func (c *Client) NewChartSession(opts ...chart.Option) (*chart.Session, error) {
+	return chart.New(c, opts...)
 }
 
 // cloneHeader returns a shallow copy of h (so callers can't mutate after Connect).
