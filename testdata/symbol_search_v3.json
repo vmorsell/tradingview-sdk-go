@@ -1,0 +1,26 @@
+{
+  "symbols_remaining": 0,
+  "symbols": [
+    {
+      "symbol": "BTCUSDT",
+      "description": "Bitcoin / Tether USD",
+      "type": "crypto",
+      "exchange": "BINANCE",
+      "prefix": ""
+    },
+    {
+      "symbol": "BTCEUR",
+      "description": "Bitcoin / <em>Euro</em>",
+      "type": "crypto",
+      "exchange": "COINBASE",
+      "prefix": ""
+    },
+    {
+      "symbol": "BTC1!",
+      "description": "Bitcoin Futures",
+      "type": "futures",
+      "exchange": "CME",
+      "prefix": "CME_MINI"
+    }
+  ]
+}

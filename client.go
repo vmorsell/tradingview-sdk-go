@@ -39,7 +39,11 @@ func Connect(ctx context.Context, opts ...Option) (*Client, error) {
 	// session cookie for a short-lived auth_token via HTTP.
 	authToken := "unauthorized_user_token"
 	if cfg.sessionID != "" {
-		user, err := getUser(ctx, cfg.httpClient, cfg.location, cfg.sessionID, cfg.sessionIDSign, cfg.userAgent)
+		user, err := GetUser(ctx, cfg.sessionID, cfg.sessionIDSign,
+			WithHTTPOptionClient(cfg.httpClient),
+			WithHTTPOptionLocation(cfg.location),
+			WithHTTPOptionUserAgent(cfg.userAgent),
+		)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrAuth, err)
 		}
@@ -149,71 +153,6 @@ func cloneHeader(h http.Header) http.Header {
 	return out
 }
 
-// getUser is the HTTP-side of auth: sessionid cookie → auth_token via
-// scraping the TradingView home page HTML. Full public API lives in http.go
-// (M3); this is the internal shim so Connect works in M2.
-func getUser(ctx context.Context, client *http.Client, location, session, signature, userAgent string) (User, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, location, nil)
-	if err != nil {
-		return User{}, err
-	}
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Cookie", authCookie(session, signature))
-
-	// Follow up to 5 redirects manually; TradingView bounces through a few.
-	var body []byte
-	const maxRedirects = 5
-	for range maxRedirects + 1 {
-		resp, err := client.Do(req)
-		if err != nil {
-			return User{}, err
-		}
-		body = nil
-		if resp.Body != nil {
-			defer resp.Body.Close()
-			const cap = 2 << 20 // 2 MiB is plenty for the home page HTML
-			buf := make([]byte, 0, 8192)
-			chunk := make([]byte, 8192)
-			for len(buf) < cap {
-				n, err := resp.Body.Read(chunk)
-				if n > 0 {
-					buf = append(buf, chunk[:n]...)
-				}
-				if err != nil {
-					break
-				}
-			}
-			body = buf
-		}
-		if loc := resp.Header.Get("Location"); loc != "" && loc != req.URL.String() {
-			next, err := req.URL.Parse(loc)
-			if err != nil {
-				return User{}, err
-			}
-			req, err = http.NewRequestWithContext(ctx, http.MethodGet, next.String(), nil)
-			if err != nil {
-				return User{}, err
-			}
-			req.Header.Set("User-Agent", userAgent)
-			req.Header.Set("Cookie", authCookie(session, signature))
-			continue
-		}
-		break
-	}
-
-	s := string(body)
-	if !containsAuthToken(s) {
-		return User{}, fmt.Errorf("auth token not found in response (wrong or expired session?)")
-	}
-	return User{
-		ID:             parseInt(reID.FindStringSubmatch(s)),
-		Username:       firstGroup(reUsername.FindStringSubmatch(s)),
-		AuthToken:      firstGroup(reAuthToken.FindStringSubmatch(s)),
-		SessionHash:    firstGroup(reSessionHash.FindStringSubmatch(s)),
-		PrivateChannel: firstGroup(rePrivateChan.FindStringSubmatch(s)),
-	}, nil
-}
-
 var (
 	reID          = regexp.MustCompile(`"id":(\d{1,10})`)
 	reUsername    = regexp.MustCompile(`"username":"(.*?)"`)
@@ -243,14 +182,4 @@ func parseInt(m []string) int64 {
 		n = n*10 + int64(r-'0')
 	}
 	return n
-}
-
-func authCookie(session, signature string) string {
-	if session == "" {
-		return ""
-	}
-	if signature == "" {
-		return "sessionid=" + session
-	}
-	return "sessionid=" + session + ";sessionid_sign=" + signature
 }
