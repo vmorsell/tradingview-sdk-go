@@ -10,6 +10,7 @@ import (
 
 	"github.com/vmorsell/tradingview-sdk-go/internal/protocol"
 	"github.com/vmorsell/tradingview-sdk-go/internal/wire"
+	"github.com/vmorsell/tradingview-sdk-go/quote"
 )
 
 // Client is a connected TradingView WebSocket. Create one with Connect.
@@ -141,6 +142,11 @@ func (c *Client) Register(sessionID string, h func(protocol.Envelope)) {
 
 // Unregister removes a session handler. Used by sub-packages.
 func (c *Client) Unregister(sessionID string) { c.registry.Unregister(sessionID) }
+
+// NewQuoteSession opens a new quote session multiplexed on this client.
+func (c *Client) NewQuoteSession(opts ...quote.Option) (*quote.Session, error) {
+	return quote.New(c, opts...)
+}
 
 // cloneHeader returns a shallow copy of h (so callers can't mutate after Connect).
 func cloneHeader(h http.Header) http.Header {
