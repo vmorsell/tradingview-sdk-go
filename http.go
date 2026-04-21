@@ -15,6 +15,10 @@ import (
 const (
 	defaultSearchBase  = "https://symbol-search.tradingview.com"
 	defaultScannerBase = "https://scanner.tradingview.com"
+	// browserUA matches what the JS reference's client sends. The
+	// symbol-search endpoint returns an HTML challenge page for obvious
+	// bot User-Agents, so we default to a real browser string.
+	browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
 // HTTPOption configures a one-shot HTTP helper (GetUser, SearchSymbol, GetTA).
@@ -32,14 +36,24 @@ type httpConfig struct {
 
 func defaultHTTPConfig() *httpConfig {
 	return &httpConfig{
-		client: &http.Client{
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+		client:      &http.Client{},
 		location:    "https://www.tradingview.com/",
-		userAgent:   "Mozilla/5.0 (compatible; tradingview-sdk-go/0.1)",
+		userAgent:   browserUA,
 		searchBase:  defaultSearchBase,
 		scannerBase: defaultScannerBase,
 	}
+}
+
+// noRedirectClient returns a copy of the user's client with redirects
+// disabled. GetUser walks the redirect chain manually because the home
+// page only exposes the auth_token after the final hop.
+func noRedirectClient(base *http.Client) *http.Client {
+	if base == nil {
+		base = &http.Client{}
+	}
+	c := *base
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &c
 }
 
 // WithHTTPOptionClient overrides the underlying *http.Client.
@@ -77,6 +91,7 @@ func fetchUser(ctx context.Context, cfg *httpConfig, sessionID, signature string
 	if sessionID == "" {
 		return User{}, fmt.Errorf("%w: empty sessionid", ErrAuth)
 	}
+	client := noRedirectClient(cfg.client)
 	next := cfg.location
 	const maxRedirects = 5
 	var body string
@@ -88,7 +103,7 @@ func fetchUser(ctx context.Context, cfg *httpConfig, sessionID, signature string
 		req.Header.Set("User-Agent", cfg.userAgent)
 		req.Header.Set("Cookie", authCookieHeader(sessionID, signature))
 
-		resp, err := cfg.client.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return User{}, err
 		}
@@ -158,6 +173,7 @@ func SearchSymbol(ctx context.Context, query string, opts ...HTTPOption) ([]Symb
 	} else {
 		q.Set("text", text)
 	}
+	q.Set("search_type", "")
 	q.Set("start", "0")
 	u.RawQuery = q.Encode()
 
@@ -167,14 +183,28 @@ func SearchSymbol(ctx context.Context, query string, opts ...HTTPOption) ([]Symb
 	}
 	req.Header.Set("User-Agent", cfg.userAgent)
 	req.Header.Set("Origin", "https://www.tradingview.com")
+	req.Header.Set("Referer", "https://www.tradingview.com/")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 
 	resp, err := cfg.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 500 {
-		return nil, fmt.Errorf("tradingview: search_symbol: %s", resp.Status)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("tradingview: search_symbol: %s (body: %s)", resp.Status, firstChars(body, 200))
+	}
+	// Detect HTML/challenge pages — content-type is unreliable (TradingView
+	// sometimes returns JSON with text/plain), but a leading '<' is a clear
+	// tell.
+	trimmed := strings.TrimSpace(string(body))
+	if strings.HasPrefix(trimmed, "<") {
+		return nil, fmt.Errorf("tradingview: search_symbol: non-JSON response (body: %s)", firstChars(body, 200))
 	}
 	var payload struct {
 		Symbols []struct {
@@ -185,8 +215,8 @@ func SearchSymbol(ctx context.Context, query string, opts ...HTTPOption) ([]Symb
 			Prefix      string `json:"prefix"`
 		} `json:"symbols"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("tradingview: decode search: %w", err)
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("tradingview: decode search: %w (body: %s)", err, firstChars(body, 200))
 	}
 	out := make([]SymbolSearchResult, 0, len(payload.Symbols))
 	for _, s := range payload.Symbols {
@@ -205,6 +235,14 @@ func SearchSymbol(ctx context.Context, query string, opts ...HTTPOption) ([]Symb
 		})
 	}
 	return out, nil
+}
+
+func firstChars(b []byte, n int) string {
+	s := strings.TrimSpace(string(b))
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 func firstWord(s string) string {
