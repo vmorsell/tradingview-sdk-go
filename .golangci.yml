@@ -1,0 +1,28 @@
+version: "2"
+
+linters:
+  default: standard
+
+  enable:
+    - errcheck
+    - gosec
+    - staticcheck
+    - unused
+    - govet
+    - ineffassign
+    - misspell
+    - unconvert
+    - unparam
+    - wastedassign
+
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec

@@ -29,14 +29,14 @@ type Session struct {
 	done    chan struct{}
 	closeCh chan struct{}
 
-	mu             sync.Mutex
-	info           MarketInfo
-	seriesCreated  bool
-	currentSerIdx  int
-	lastMarket     *marketConfig
-	lastMarketSym  string
-	lastTimeframe  string
-	lastRange      int
+	mu            sync.Mutex
+	info          MarketInfo
+	seriesCreated bool
+	currentSerIdx int
+	lastMarket    *marketConfig
+	lastMarketSym string
+	lastTimeframe string
+	lastRange     int
 
 	dropped   atomic.Uint64
 	closeOnce sync.Once
