@@ -199,9 +199,9 @@ func SearchSymbol(ctx context.Context, query string, opts ...HTTPOption) ([]Symb
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("tradingview: search_symbol: %s (body: %s)", resp.Status, firstChars(body, 200))
 	}
-	// Detect HTML/challenge pages — content-type is unreliable (TradingView
-	// sometimes returns JSON with text/plain), but a leading '<' is a clear
-	// tell.
+	// Content-Type on this endpoint is unreliable (TradingView sometimes
+	// serves JSON as text/plain), so check the body directly. A leading '<'
+	// almost always means we got an HTML challenge or redirect page back.
 	trimmed := strings.TrimSpace(string(body))
 	if strings.HasPrefix(trimmed, "<") {
 		return nil, fmt.Errorf("tradingview: search_symbol: non-JSON response (body: %s)", firstChars(body, 200))
@@ -242,7 +242,7 @@ func firstChars(b []byte, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return s[:n] + "..."
 }
 
 func firstWord(s string) string {

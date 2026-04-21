@@ -57,7 +57,7 @@ func TestGetUserParsesHTML(t *testing.T) {
 
 func TestGetUserRejectsExpiredSession(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// No auth_token in body — simulates logged-out response.
+		// Logged-out response: no auth_token anywhere in the HTML.
 		_, _ = w.Write([]byte(`<html><body>Please log in</body></html>`))
 	}))
 	t.Cleanup(srv.Close)

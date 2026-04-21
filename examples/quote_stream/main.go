@@ -1,11 +1,10 @@
-// Command quote_stream subscribes to one or more symbols and prints their
-// last price as TradingView pushes updates.
-//
-// Usage:
+// Command quote_stream subscribes to one or more TradingView symbols and
+// prints the last price every time the server pushes an update. Run it
+// with at least one fully-qualified symbol:
 //
 //	go run ./examples/quote_stream BINANCE:BTCUSDT COINBASE:ETHEUR
 //
-// Exits on SIGINT.
+// Ctrl-C to exit.
 package main
 
 import (

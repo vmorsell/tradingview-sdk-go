@@ -1,8 +1,6 @@
-// Command symbol_search looks up symbols by keyword (optionally filtered by
-// exchange) and prints the top matches plus TradingView's TA snapshot for
-// the first hit.
-//
-// Usage:
+// Command symbol_search looks up symbols by keyword and prints the top
+// matches together with TradingView's TA snapshot for the first hit. An
+// exchange prefix ("binance:eth") narrows the search:
 //
 //	go run ./examples/symbol_search btc
 //	go run ./examples/symbol_search binance:eth

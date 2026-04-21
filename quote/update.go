@@ -1,12 +1,13 @@
 package quote
 
-// Update is emitted on Session.Updates. Exactly one concrete variant is
-// returned per emission; type-switch on it at the call site.
+// Update is the common type emitted on Session.Updates. Every emission is
+// exactly one of the concrete variants below; use a type switch at the
+// call site.
 type Update interface{ isQuoteUpdate() }
 
-// QuoteData is a per-symbol field delta merged with all fields previously
-// received for that symbol. Fields contains only what changed since the last
-// emission, but callers get the accumulated view.
+// QuoteData carries the accumulated field state for a symbol. The server
+// sends deltas, but the session merges them so consumers see the full
+// picture on every update.
 type QuoteData struct {
 	Symbol string
 	Fields map[Field]any
@@ -14,17 +15,18 @@ type QuoteData struct {
 
 func (QuoteData) isQuoteUpdate() {}
 
-// QuoteCompleted fires once TradingView has delivered the initial snapshot
-// for a symbol (the server emits quote_completed exactly once per symbol).
+// QuoteCompleted is emitted once TradingView signals that the initial
+// snapshot for a symbol has finished loading. It fires exactly once per
+// (symbol, session) subscription.
 type QuoteCompleted struct {
 	Symbol string
 }
 
 func (QuoteCompleted) isQuoteUpdate() {}
 
-// QuoteError signals a per-symbol error (e.g. unknown symbol, permission
-// denied). Delivered with priority — never dropped by the backpressure
-// policy.
+// QuoteError reports a per-symbol failure such as an unknown ticker or a
+// permission denial. Errors go through a priority path and are not dropped
+// by the backpressure policy unless the session is closing.
 type QuoteError struct {
 	Symbol string
 	Err    error
@@ -32,8 +34,9 @@ type QuoteError struct {
 
 func (QuoteError) isQuoteUpdate() {}
 
-// SessionKind is the market session used when subscribing: regular trading
-// hours ("regular") or extended hours ("extended").
+// SessionKind picks the market session a quote subscription uses.
+// SessionRegular is the common case; SessionExtended covers pre- and
+// post-market on exchanges that offer it.
 type SessionKind string
 
 const (

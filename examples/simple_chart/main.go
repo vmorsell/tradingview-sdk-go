@@ -1,11 +1,9 @@
-// Command simple_chart resolves a symbol and prints the last candle on
-// every update.
-//
-// Usage:
+// Command simple_chart loads one market on a given timeframe and logs
+// each candle as TradingView pushes it.
 //
 //	go run ./examples/simple_chart BINANCE:BTCEUR D
 //
-// Exits on SIGINT.
+// Ctrl-C to stop.
 package main
 
 import (

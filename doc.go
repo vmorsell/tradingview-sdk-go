@@ -1,19 +1,21 @@
-// Package tradingview is a Go SDK for TradingView's unofficial WebSocket and
-// HTTP APIs.
+// Package tradingview is an unofficial Go client for TradingView's realtime
+// WebSocket and HTTP APIs.
 //
-// The SDK opens a single long-lived WebSocket connection and multiplexes
-// quote and chart sessions over it. HTTP helpers cover session-cookie auth,
-// symbol search, and technical-analysis lookups.
+// A single Client holds one WebSocket connection and multiplexes quote and
+// chart sessions over it. Streaming data arrives on per-session channels
+// carrying a sum type (data, completed, error). HTTP helpers handle
+// session-cookie auth, symbol search, and technical-analysis lookups.
 //
-// # Quickstart
+// Basic usage:
 //
 //	ctx := context.Background()
 //	client, err := tradingview.Connect(ctx)
-//	if err != nil { log.Fatal(err) }
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
 //	defer client.Close()
 //
-//	qs, err := client.NewQuoteSession()
-//	if err != nil { log.Fatal(err) }
+//	qs, _ := client.NewQuoteSession()
 //	qs.AddSymbol("BINANCE:BTCUSDT", quote.SessionRegular)
 //
 //	for u := range qs.Updates() {
@@ -22,11 +24,13 @@
 //	    }
 //	}
 //
-// See the examples/ directory for runnable programs.
+// See the examples/ directory for runnable programs covering quote
+// streaming, chart streaming, and symbol search.
 //
 // # Scope
 //
-// v0.1 ships the core: quote streaming, chart streaming with OHLCV candles,
-// and three HTTP helpers (GetUser, SearchSymbol, GetTA). Indicators, replay
-// mode, drawings, and email/password login are deferred.
+// v0.1 implements the core streaming primitives (quotes, charts) and three
+// HTTP helpers (GetUser, SearchSymbol, GetTA). Indicators, replay mode,
+// custom chart types, drawings, and email/password login are out of scope
+// for now.
 package tradingview

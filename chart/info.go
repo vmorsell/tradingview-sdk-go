@@ -1,7 +1,8 @@
 package chart
 
-// MarketInfo is the subset of TradingView's symbol_resolved payload this
-// SDK exposes. Extend on demand.
+// MarketInfo carries the fields from TradingView's symbol_resolved packet
+// that this SDK surfaces. Add more on demand; the wire-side struct in
+// session.go decodes everything the server sends.
 type MarketInfo struct {
 	SeriesID       string
 	Name           string

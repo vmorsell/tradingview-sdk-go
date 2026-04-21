@@ -1,10 +1,12 @@
 package chart
 
-// Update is emitted on Session.Updates.
+// Update is the common type emitted on Session.Updates. Use a type switch
+// to dispatch on the concrete variants below.
 type Update interface{ isChartUpdate() }
 
-// SymbolResolved fires once TradingView accepts the symbol and ships its
-// metadata. Info is also accessible via Session.Info() at any time.
+// SymbolResolved fires once TradingView accepts the symbol and returns
+// its metadata. The same snapshot is available via Session.Info at any
+// time after this event.
 type SymbolResolved struct {
 	Info MarketInfo
 }
@@ -19,8 +21,10 @@ type Candles struct {
 
 func (Candles) isChartUpdate() {}
 
-// ChartError is a server-reported error (symbol_error, series_error,
-// critical_error). Delivered with priority — never dropped.
+// ChartError reports a server-side error such as symbol_error,
+// series_error, or critical_error. Like QuoteError in the quote package,
+// it flows through the priority path and is not dropped under normal
+// backpressure.
 type ChartError struct {
 	Kind string
 	Err  error

@@ -11,16 +11,19 @@ import (
 	"github.com/vmorsell/tradingview-sdk-go/internal/protocol"
 )
 
-// Bridge is the subset of the TradingView Client the session consumes.
-// Defined locally so quote never imports the root package — the Client
-// satisfies this structurally.
+// ErrQuoteServer wraps a server-side quote error packet.
+var ErrQuoteServer = errors.New("quote: server error")
+
+// Bridge is the minimal subset of the TradingView Client that a quote
+// session needs. It is defined locally so this package does not import
+// the root package; the Client satisfies it structurally.
 type Bridge interface {
 	Send(method string, params ...any) error
 	Register(sessionID string, h func(env protocol.Envelope))
 	Unregister(sessionID string)
 }
 
-// Option configures a Session.
+// Option configures a Session at construction time.
 type Option func(*config)
 
 type config struct {
@@ -29,24 +32,27 @@ type config struct {
 	bufferSize   int
 }
 
-// WithFields selects a preset bundle of fields.
+// WithFields selects a preset bundle of fields. See FieldPreset for the
+// available presets.
 func WithFields(p FieldPreset) Option {
 	return func(c *config) { c.fields = fieldsForPreset(p) }
 }
 
 // WithCustomFields overrides the field set with a caller-provided list.
+// Takes precedence over WithFields when both are supplied.
 func WithCustomFields(fs ...Field) Option {
 	return func(c *config) { c.customFields = append([]Field(nil), fs...) }
 }
 
-// WithBufferSize sets the Updates() channel capacity. Default 64.
-// Use higher values for very chatty symbols or slow consumers.
+// WithBufferSize sets the capacity of the Updates channel (default 64).
+// Raise this for chatty symbols or slow consumers; see the drop-oldest
+// behaviour documented on Session.DroppedUpdates.
 func WithBufferSize(n int) Option {
 	return func(c *config) { c.bufferSize = n }
 }
 
-// Session is one TradingView quote session hosting an arbitrary number of
-// symbols. Create with Client.NewQuoteSession.
+// Session is one TradingView quote session. It hosts any number of
+// symbols and emits updates on a single channel.
 type Session struct {
 	id     string
 	bridge Bridge
@@ -57,14 +63,14 @@ type Session struct {
 
 	mu        sync.Mutex
 	state     map[string]map[Field]any // accumulated last value per symbol
-	subscribe map[string]struct{}      // symbolKey → subscribed flag
+	subscribe map[string]struct{}      // symbolKey -> subscribed flag
 
 	dropped   atomic.Uint64
 	closeOnce sync.Once
 }
 
-// New creates a new Session on bridge. Not usually called directly — use
-// Client.NewQuoteSession in the root package.
+// New creates a new Session on bridge. In normal use callers go through
+// Client.NewQuoteSession rather than calling this directly.
 func New(bridge Bridge, opts ...Option) (*Session, error) {
 	cfg := &config{bufferSize: 64}
 	for _, o := range opts {
@@ -105,26 +111,27 @@ func New(bridge Bridge, opts ...Option) (*Session, error) {
 	return s, nil
 }
 
-// AddSymbol subscribes to a symbol on this session. Safe to call repeatedly
-// with the same (symbol, kind); the server deduplicates.
+// AddSymbol subscribes to a symbol on this session. Repeated calls with
+// the same (symbol, kind) are idempotent.
 func (s *Session) AddSymbol(symbol string, kind SessionKind) error {
 	if kind == "" {
 		kind = SessionRegular
 	}
 	key := symbolKey(symbol, kind)
 	s.mu.Lock()
-	_, ok := s.subscribe[key]
-	if !ok {
+	_, already := s.subscribe[key]
+	if !already {
 		s.subscribe[key] = struct{}{}
 	}
 	s.mu.Unlock()
-	if ok {
+	if already {
 		return nil
 	}
 	return s.bridge.Send("quote_add_symbols", s.id, key)
 }
 
-// RemoveSymbol unsubscribes from a symbol.
+// RemoveSymbol unsubscribes from a symbol. A no-op if the symbol was not
+// previously subscribed.
 func (s *Session) RemoveSymbol(symbol string, kind SessionKind) error {
 	if kind == "" {
 		kind = SessionRegular
@@ -137,19 +144,20 @@ func (s *Session) RemoveSymbol(symbol string, kind SessionKind) error {
 	return s.bridge.Send("quote_remove_symbols", s.id, key)
 }
 
-// Updates returns the single event stream for this session. Closed when
-// the session (or its client) shuts down.
+// Updates returns the single event stream for this session. The channel
+// is closed when the session (or its client) shuts down.
 func (s *Session) Updates() <-chan Update { return s.updates }
 
-// Done fires when the session is fully closed.
+// Done fires once the session is fully torn down.
 func (s *Session) Done() <-chan struct{} { return s.done }
 
-// DroppedUpdates reports how many non-priority updates have been dropped
-// due to a slow consumer. Error and Completed variants are never dropped.
+// DroppedUpdates reports how many data updates have been evicted under
+// backpressure since the session was created. QuoteError and
+// QuoteCompleted are delivered via a priority path and never count.
 func (s *Session) DroppedUpdates() uint64 { return s.dropped.Load() }
 
-// Close unsubscribes, tells TradingView to delete the session, and closes
-// the updates channel. Idempotent.
+// Close asks TradingView to release the session and closes the Updates
+// channel. Idempotent; safe to call from any goroutine.
 func (s *Session) Close() error {
 	var firstErr error
 	s.closeOnce.Do(func() {
@@ -164,7 +172,7 @@ func (s *Session) Close() error {
 	return firstErr
 }
 
-// handle is invoked on the dispatcher goroutine.
+// handle runs on the dispatcher goroutine.
 func (s *Session) handle(env protocol.Envelope) {
 	select {
 	case <-s.closeCh:
@@ -182,8 +190,9 @@ func (s *Session) handle(env protocol.Envelope) {
 	}
 }
 
-// handleQSD handles a quote-session-data packet.
-// params shape: [sessionID, {"n": symbolKey, "s": "ok|error", "v": {...}}].
+// handleQSD processes a quote-session-data packet.
+//
+// Wire shape: [sessionID, {"n": symbolKey, "s": "ok|error", "v": {...}}].
 func (s *Session) handleQSD(env protocol.Envelope) {
 	if len(env.Params) < 2 {
 		return
@@ -234,8 +243,8 @@ func (s *Session) handleCompleted(env protocol.Envelope) {
 }
 
 func (s *Session) handleError(env protocol.Envelope) {
-	// quote_error arrives with per-symbol context; forward as a priority
-	// update so callers see it even under backpressure.
+	// quote_error carries per-symbol context. Route it through the
+	// priority path so slow consumers still see it.
 	sym := ""
 	if len(env.Params) >= 2 {
 		var key string
@@ -246,15 +255,15 @@ func (s *Session) handleError(env protocol.Envelope) {
 	s.priorityEmit(QuoteError{Symbol: sym, Err: fmt.Errorf("%w: %v", ErrQuoteServer, env.Params)})
 }
 
-// emit pushes a data update with drop-oldest backpressure.
-// Counts one drop per eviction so callers can observe pressure.
+// emit pushes a data update with drop-oldest backpressure. Each eviction
+// increments the drop counter so callers can observe sustained pressure.
 func (s *Session) emit(u Update) {
 	select {
 	case s.updates <- u:
 		return
 	default:
 	}
-	// Full — drop the oldest entry to make room, then send.
+	// Channel is full. Evict the oldest entry and try again.
 	select {
 	case <-s.updates:
 		s.dropped.Add(1)
@@ -263,14 +272,14 @@ func (s *Session) emit(u Update) {
 	select {
 	case s.updates <- u:
 	default:
-		// Concurrent reader/writer race; the new update is lost too.
+		// Lost a race with another writer or with Close.
 		s.dropped.Add(1)
 	}
 }
 
-// priorityEmit delivers an error/completed update. If the channel is full
-// it evicts an older data update to make room — priority emits are never
-// themselves dropped unless Close has raced with us.
+// priorityEmit delivers an error or completed update. It still respects
+// the channel's capacity but evicts a data update to make room rather
+// than dropping the priority event itself.
 func (s *Session) priorityEmit(u Update) {
 	select {
 	case s.updates <- u:
@@ -289,10 +298,8 @@ func (s *Session) priorityEmit(u Update) {
 	}
 }
 
-// ErrQuoteServer wraps a server-side quote error.
-var ErrQuoteServer = errors.New("quote: server error")
-
-// symbolKey is TradingView's wire-format symbol reference: `={"session":"regular","symbol":"BINANCE:BTCUSDT"}`.
+// symbolKey builds TradingView's wire-format symbol reference, e.g.
+// ={"session":"regular","symbol":"BINANCE:BTCUSDT"}.
 func symbolKey(symbol string, kind SessionKind) string {
 	b, _ := json.Marshal(struct {
 		Session string `json:"session"`
@@ -301,8 +308,8 @@ func symbolKey(symbol string, kind SessionKind) string {
 	return "=" + string(b)
 }
 
-// parseSymbolFromKey pulls the original symbol out of a wire key. Falls
-// back to the key itself if decoding fails.
+// parseSymbolFromKey extracts the symbol from a wire key, falling back to
+// the raw key if it can't be decoded.
 func parseSymbolFromKey(key string) string {
 	if len(key) > 0 && key[0] == '=' {
 		var obj struct {

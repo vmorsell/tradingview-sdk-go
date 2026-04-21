@@ -1,26 +1,30 @@
-// Package quote implements the TradingView quote session — realtime
-// per-symbol field updates (last price, volume, bid/ask, fundamentals, …).
+// Package quote implements the TradingView quote session: realtime,
+// per-symbol field updates covering last price, volume, bid/ask, and
+// fundamentals.
 //
-// One quote session can host many symbols; updates arrive as a single
-// channel of sum-type events tagged by symbol.
+// One session hosts any number of symbols and emits updates on a single
+// channel, tagged by symbol name.
 package quote
 
-// Field is a TradingView quote field name. Send only the fields you care
-// about to reduce bandwidth; the default FieldPresetAll covers the common
-// set the reference JS SDK uses.
+// Field is a TradingView quote field name.
+//
+// Send only the fields you care about to reduce bandwidth. FieldPresetAll
+// covers the full set the web client uses.
 type Field string
 
 // FieldPreset selects a canned bundle of fields.
 type FieldPreset int
 
 const (
-	// FieldPresetAll is the full "all" bundle (~45 fields).
+	// FieldPresetAll requests every field the web client subscribes to
+	// (roughly 45 of them, including fundamentals).
 	FieldPresetAll FieldPreset = iota
-	// FieldPresetPrice subscribes only to last price ("lp").
+	// FieldPresetPrice requests just the last price ("lp").
 	FieldPresetPrice
 )
 
-// Common fields. Values map directly to TradingView keys.
+// Common field names. Values map directly to TradingView keys, so callers
+// that want an unlisted one can construct their own Field literal.
 const (
 	FieldLastPrice       Field = "lp"
 	FieldLastPriceTime   Field = "lp_time"

@@ -15,8 +15,9 @@ import (
 	"github.com/vmorsell/tradingview-sdk-go/internal/protocol"
 )
 
-// Conn is the minimal websocket interface the pump depends on, satisfied by
-// *websocket.Conn. Narrowed so tests can stub without pulling in httptest.
+// Conn is the minimal WebSocket surface the pump uses. *websocket.Conn
+// satisfies it; keeping it narrow makes the pump testable without
+// pulling in httptest.
 type Conn interface {
 	ReadMessage() (messageType int, p []byte, err error)
 	WriteMessage(messageType int, data []byte) error
@@ -25,13 +26,13 @@ type Conn interface {
 	SetWriteDeadline(time.Time) error
 }
 
-// UnsolicitedHandler is invoked for envelopes that have no matching session
-// id — typically the server's connection hello, or data the server pushes
-// before a session is created.
+// UnsolicitedHandler is called for envelopes with no matching session id.
+// In practice this covers the server's connection hello and any stray
+// packets that arrive before a session is registered.
 type UnsolicitedHandler func(env protocol.Envelope)
 
-// Pump runs the reader + writer + dispatcher goroutines for one Conn.
-// It is constructed once per Client lifetime.
+// Pump runs the reader, writer, and dispatcher goroutines for one Conn.
+// Construct one per Client lifetime.
 type Pump struct {
 	conn    Conn
 	logger  *slog.Logger
@@ -47,17 +48,17 @@ type Pump struct {
 	wg        sync.WaitGroup
 }
 
-// Options configure a new Pump.
+// Options configures a new Pump.
 type Options struct {
-	Conn               Conn
-	Logger             *slog.Logger
-	Registry           *Registry
-	Unsolicited        UnsolicitedHandler
-	SendBuffer         int
-	ShutdownDrainLimit time.Duration
+	Conn        Conn
+	Logger      *slog.Logger
+	Registry    *Registry
+	Unsolicited UnsolicitedHandler
+	SendBuffer  int
 }
 
-// NewPump wires up a Pump. It does not start goroutines; call Start.
+// NewPump wires up a Pump. It does not start any goroutines; call Start
+// once the returned Pump is stored on the owning Client.
 func NewPump(opts Options) *Pump {
 	if opts.SendBuffer <= 0 {
 		opts.SendBuffer = 256
@@ -65,7 +66,7 @@ func NewPump(opts Options) *Pump {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	p := &Pump{
+	return &Pump{
 		conn:    opts.Conn,
 		logger:  opts.Logger,
 		reg:     opts.Registry,
@@ -74,10 +75,9 @@ func NewPump(opts Options) *Pump {
 		quitCh:  make(chan struct{}),
 		doneCh:  make(chan struct{}),
 	}
-	return p
 }
 
-// Start launches reader and writer goroutines.
+// Start launches the reader and writer goroutines.
 func (p *Pump) Start() {
 	p.wg.Add(2)
 	go p.readLoop()
@@ -88,8 +88,8 @@ func (p *Pump) Start() {
 	}()
 }
 
-// Send enqueues a framed payload for the writer goroutine.
-// Returns an error only if the pump is shutting down.
+// Send enqueues a framed payload for the writer. Returns an error only
+// when the pump is shutting down.
 func (p *Pump) Send(frame []byte) error {
 	select {
 	case <-p.quitCh:
@@ -99,12 +99,13 @@ func (p *Pump) Send(frame []byte) error {
 	}
 }
 
-// Close initiates graceful shutdown. Safe to call multiple times.
-// Blocks until both goroutines exit.
+// Close starts graceful shutdown and blocks until both goroutines exit.
+// Safe to call multiple times.
 //
-// Only the writer goroutine touches the underlying conn; Close signals via
-// quitCh so the writer sends the close frame and closes the conn itself.
-// This keeps gorilla/websocket's single-writer invariant intact.
+// Only the writer goroutine touches the underlying conn. Close signals
+// via quitCh so the writer itself sends the WebSocket close frame and
+// closes the conn, which keeps gorilla/websocket's single-writer
+// invariant intact.
 func (p *Pump) Close() error {
 	p.initiateClose()
 	<-p.doneCh
@@ -118,10 +119,11 @@ func (p *Pump) initiateClose() {
 	p.closeOnce.Do(func() { close(p.quitCh) })
 }
 
-// Done fires when both goroutines have exited.
+// Done closes when both goroutines have exited.
 func (p *Pump) Done() <-chan struct{} { return p.doneCh }
 
-// Err reports the first fatal error, available after Done fires.
+// Err returns the first fatal error observed. Populated only after Done
+// has fired.
 func (p *Pump) Err() error {
 	if e := p.errSlot.Load(); e != nil {
 		return *e
@@ -133,8 +135,8 @@ func (p *Pump) recordErr(err error) {
 	if err == nil {
 		return
 	}
-	// CompareAndSwap would be right, but Pointer has no CAS — a first-writer
-	// wins via a nil check is close enough (goroutines rarely race here).
+	// atomic.Pointer has no CAS; a nil-check first-writer-wins is close
+	// enough because reader and writer rarely race on this slot.
 	if p.errSlot.Load() == nil {
 		p.errSlot.Store(&err)
 	}
@@ -142,7 +144,7 @@ func (p *Pump) recordErr(err error) {
 
 func (p *Pump) readLoop() {
 	defer p.wg.Done()
-	// Server-initiated close must also trigger writer shutdown.
+	// A server-initiated close must also trigger the writer to exit.
 	defer p.initiateClose()
 	for {
 		_, data, err := p.conn.ReadMessage()
@@ -165,9 +167,9 @@ func (p *Pump) readLoop() {
 
 func (p *Pump) dispatch(env protocol.Envelope) {
 	if env.IsPing() {
-		// Echo heartbeat via the writer. Non-blocking: if the send buffer is
-		// full, drop — TradingView tolerates a missed beat and the next
-		// heartbeat will recover.
+		// Echo heartbeat via the writer. Non-blocking on purpose: if the
+		// send buffer is full we skip this beat since TradingView will
+		// retry with the next heartbeat anyway.
 		select {
 		case p.sendCh <- protocol.EncodeHeartbeat(env.Ping):
 		default:
@@ -188,8 +190,8 @@ func (p *Pump) dispatch(env protocol.Envelope) {
 
 func (p *Pump) writeLoop() {
 	defer p.wg.Done()
-	// Only the writer touches the conn; it also owns shutdown of the conn
-	// so the reader unblocks from ReadMessage.
+	// The writer owns the conn, including closing it, so the reader
+	// unblocks from ReadMessage once we're done.
 	defer func() { _ = p.conn.Close() }()
 	for {
 		select {
@@ -212,7 +214,8 @@ func (p *Pump) writeLoop() {
 }
 
 func (p *Pump) drainSend() {
-	// Short, bounded drain — don't block shutdown on a full buffer.
+	// Best-effort: flush anything already queued, bounded by a short
+	// timer so shutdown can't wedge on a full buffer.
 	deadline := time.NewTimer(100 * time.Millisecond)
 	defer deadline.Stop()
 	for {
@@ -238,12 +241,11 @@ func isExpectedCloseErr(err error) bool {
 		websocket.CloseAbnormalClosure) {
 		return true
 	}
-	// net.ErrClosed surfaces when the writer has already closed the conn;
-	// not a real fault.
+	// net.ErrClosed surfaces when the writer has already closed the conn.
 	if errors.Is(err, net.ErrClosed) {
 		return true
 	}
-	// gorilla wraps the close-sequence race as a plain io error string.
+	// gorilla surfaces the close-sequence race as a plain io error.
 	if strings.Contains(err.Error(), "use of closed network connection") {
 		return true
 	}
@@ -254,5 +256,5 @@ func truncate(b []byte, n int) string {
 	if len(b) <= n {
 		return string(b)
 	}
-	return string(b[:n]) + "…"
+	return string(b[:n]) + "..."
 }

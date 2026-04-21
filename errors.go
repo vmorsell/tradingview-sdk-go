@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// Sentinel errors.
+// Sentinel errors returned or wrapped by the SDK. Use errors.Is to match.
 var (
 	ErrNotConnected  = errors.New("tradingview: not connected")
 	ErrClosed        = errors.New("tradingview: client closed")
@@ -31,8 +31,8 @@ func (e *ProtocolError) Error() string {
 
 func (e *ProtocolError) Unwrap() error { return e.Wrapped }
 
-// ServerError carries a server-reported error envelope (e.g. symbol_error,
-// series_error, critical_error, protocol_error).
+// ServerError carries a server-reported error envelope such as
+// symbol_error, series_error, critical_error, or protocol_error.
 type ServerError struct {
 	Kind string
 	Args []any

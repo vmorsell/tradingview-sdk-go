@@ -11,19 +11,19 @@ import (
 	"github.com/vmorsell/tradingview-sdk-go/internal/protocol"
 )
 
-// Bridge is the subset of the Client the chart session consumes.
+// Bridge is the subset of the Client a chart session consumes. Defined
+// locally to avoid an import cycle with the root package.
 type Bridge interface {
 	Send(method string, params ...any) error
 	Register(sessionID string, h func(env protocol.Envelope))
 	Unregister(sessionID string)
 }
 
-// Session hosts one chart. A Client may open many; each shows one market
-// at a time (SetMarket swaps the current market in place).
+// Session hosts one chart. A Client may open many of them; each shows
+// one market at a time (SetMarket swaps the current market in place).
 type Session struct {
 	id     string
 	bridge Bridge
-	cfg    *config
 
 	updates chan Update
 	done    chan struct{}
@@ -33,16 +33,13 @@ type Session struct {
 	info          MarketInfo
 	seriesCreated bool
 	currentSerIdx int
-	lastMarket    *marketConfig
-	lastMarketSym string
-	lastTimeframe string
-	lastRange     int
 
 	dropped   atomic.Uint64
 	closeOnce sync.Once
 }
 
-// New creates a chart session on bridge. Typically called via Client.NewChartSession.
+// New creates a chart session on bridge. Most callers go through
+// Client.NewChartSession instead.
 func New(bridge Bridge, opts ...Option) (*Session, error) {
 	cfg := &config{bufferSize: 64, timezone: "Etc/UTC"}
 	for _, o := range opts {
@@ -52,7 +49,6 @@ func New(bridge Bridge, opts ...Option) (*Session, error) {
 	s := &Session{
 		id:      protocol.GenSessionID("cs"),
 		bridge:  bridge,
-		cfg:     cfg,
 		updates: make(chan Update, cfg.bufferSize),
 		done:    make(chan struct{}),
 		closeCh: make(chan struct{}),
@@ -72,7 +68,7 @@ func New(bridge Bridge, opts ...Option) (*Session, error) {
 	return s, nil
 }
 
-// SetMarket resolves a symbol and kicks off streaming its candles.
+// SetMarket resolves a symbol and begins streaming its candles.
 // Subsequent calls swap the market in place.
 func (s *Session) SetMarket(symbol string, opts ...MarketOption) error {
 	mc := &marketConfig{
@@ -87,10 +83,6 @@ func (s *Session) SetMarket(symbol string, opts ...MarketOption) error {
 	s.mu.Lock()
 	s.currentSerIdx++
 	serIdx := s.currentSerIdx
-	s.lastMarket = mc
-	s.lastMarketSym = symbol
-	s.lastTimeframe = mc.timeframe
-	s.lastRange = mc.numCandles
 	s.mu.Unlock()
 
 	symInit := map[string]any{
@@ -114,8 +106,8 @@ func (s *Session) SetMarket(symbol string, opts ...MarketOption) error {
 	return s.setSeriesLocked(mc.timeframe, mc.numCandles, mc.to, serIdx)
 }
 
-// SetSeries changes the timeframe or candle count without re-resolving the
-// symbol. Must follow a SetMarket.
+// SetSeries changes the timeframe or candle count without re-resolving
+// the symbol. It is invalid to call before SetMarket.
 func (s *Session) SetSeries(timeframe string, opts ...MarketOption) error {
 	mc := &marketConfig{timeframe: timeframe, numCandles: 100}
 	for _, o := range opts {
@@ -124,8 +116,6 @@ func (s *Session) SetSeries(timeframe string, opts ...MarketOption) error {
 
 	s.mu.Lock()
 	serIdx := s.currentSerIdx
-	s.lastTimeframe = mc.timeframe
-	s.lastRange = mc.numCandles
 	s.mu.Unlock()
 	if serIdx == 0 {
 		return errors.New("chart: SetMarket must be called before SetSeries")
@@ -160,7 +150,8 @@ func (s *Session) setSeriesLocked(timeframe string, numCandles int, to int64, se
 	)
 }
 
-// RequestMore fetches n additional earlier candles for the current series.
+// RequestMore fetches n additional earlier candles for the current
+// series. A no-op for n <= 0.
 func (s *Session) RequestMore(n int) error {
 	if n <= 0 {
 		return nil
@@ -168,28 +159,33 @@ func (s *Session) RequestMore(n int) error {
 	return s.bridge.Send("request_more_data", s.id, "$prices", n)
 }
 
-// SetTimezone switches the chart timezone.
+// SetTimezone switches the chart timezone. See
+// https://www.tradingview.com/charting-library-docs/latest/ui_elements/timezones
+// for the accepted values.
 func (s *Session) SetTimezone(tz string) error {
 	return s.bridge.Send("switch_timezone", s.id, tz)
 }
 
 // Info returns a snapshot of the most recently resolved market metadata.
+// Safe to call concurrently.
 func (s *Session) Info() MarketInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.info
 }
 
-// Updates returns the event stream.
+// Updates returns the event stream for this session. Closed on shutdown.
 func (s *Session) Updates() <-chan Update { return s.updates }
 
 // Done fires when the session has fully torn down.
 func (s *Session) Done() <-chan struct{} { return s.done }
 
-// DroppedUpdates counts data updates dropped under backpressure.
+// DroppedUpdates reports how many Candles updates have been evicted
+// under backpressure. Errors and SymbolResolved are never counted.
 func (s *Session) DroppedUpdates() uint64 { return s.dropped.Load() }
 
-// Close deletes the chart session and releases resources. Idempotent.
+// Close asks TradingView to release the session and closes the Updates
+// channel. Idempotent.
 func (s *Session) Close() error {
 	var firstErr error
 	s.closeOnce.Do(func() {
@@ -273,8 +269,9 @@ func (s *Session) handleSymbolResolved(env protocol.Envelope) {
 	s.priorityEmit(SymbolResolved{Info: info})
 }
 
-// handleTimescale decodes a timescale_update / du payload.
-// Shape: [sessionID, {"$prices": {"s": [{"i": idx, "v": [t,o,h,l,c,vol]}, ...]}}].
+// handleTimescale decodes a timescale_update or du payload.
+//
+// Wire shape: [sessionID, {"$prices": {"s": [{"i": idx, "v": [t,o,h,l,c,vol]}, ...]}}].
 func (s *Session) handleTimescale(env protocol.Envelope) {
 	if len(env.Params) < 2 {
 		return
