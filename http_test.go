@@ -106,6 +106,47 @@ func TestSearchSymbolDecodesFixture(t *testing.T) {
 	}
 }
 
+func TestSearchSymbolAttachesCookieWhenAuthSet(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Cookie")
+		_, _ = w.Write([]byte(`{"symbols":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := SearchSymbol(t.Context(), "btc",
+		withSearchBase(srv.URL),
+		WithHTTPOptionClient(srv.Client()),
+		WithHTTPOptionAuth("sid-value", "sig-value"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "sessionid=sid-value;sessionid_sign=sig-value" {
+		t.Errorf("Cookie: %q", got)
+	}
+}
+
+func TestSearchSymbolNoCookieByDefault(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Cookie")
+		_, _ = w.Write([]byte(`{"symbols":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := SearchSymbol(t.Context(), "btc",
+		withSearchBase(srv.URL),
+		WithHTTPOptionClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Errorf("Cookie should be empty without WithHTTPOptionAuth, got %q", got)
+	}
+}
+
 func TestSearchSymbolWithExchangePrefix(t *testing.T) {
 	var captured struct {
 		Exchange string
@@ -183,5 +224,49 @@ func TestGetTAShapesResponse(t *testing.T) {
 	}
 	if m1.MA != 0.9 {
 		t.Errorf("TF1m.MA: %v", m1.MA)
+	}
+}
+
+func TestGetTAAttachesCookieWhenAuthSet(t *testing.T) {
+	body := fixture(t, "scanner_ta.json")
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Cookie")
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := GetTA(t.Context(), "BINANCE:BTCUSDT",
+		withScannerBase(srv.URL),
+		WithHTTPOptionClient(srv.Client()),
+		WithHTTPOptionAuth("sid-value", ""),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Empty signature path: just sessionid, no semicolon-suffixed pair.
+	if got != "sessionid=sid-value" {
+		t.Errorf("Cookie: %q", got)
+	}
+}
+
+func TestGetTANoCookieByDefault(t *testing.T) {
+	body := fixture(t, "scanner_ta.json")
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Cookie")
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := GetTA(t.Context(), "BINANCE:BTCUSDT",
+		withScannerBase(srv.URL),
+		WithHTTPOptionClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Errorf("Cookie should be empty without WithHTTPOptionAuth, got %q", got)
 	}
 }

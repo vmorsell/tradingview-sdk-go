@@ -143,6 +143,17 @@ client, err := tradingview.Connect(ctx,
 
 If all you need is the `auth_token`, `tradingview.GetUser` performs that exchange standalone.
 
+The HTTP helpers (`SearchSymbol`, `GetTA`) default to anonymous, which silently demotes paid users to delayed feeds for entitled markets (US equities especially). Pass `WithHTTPOptionAuth` to attach the same session cookies on those calls:
+
+```go
+ta, err := tradingview.GetTA(ctx, "NASDAQ:AAPL",
+    tradingview.WithHTTPOptionAuth(
+        os.Getenv("TV_SESSIONID"),
+        os.Getenv("TV_SESSIONID_SIGN"),
+    ),
+)
+```
+
 ## Configuration
 
 ```go

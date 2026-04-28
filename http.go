@@ -27,11 +27,13 @@ const (
 type HTTPOption func(*httpConfig)
 
 type httpConfig struct {
-	client      *http.Client
-	location    string
-	userAgent   string
-	searchBase  string
-	scannerBase string
+	client        *http.Client
+	location      string
+	userAgent     string
+	searchBase    string
+	scannerBase   string
+	sessionID     string
+	sessionIDSign string
 }
 
 func defaultHTTPConfig() *httpConfig {
@@ -70,6 +72,18 @@ func WithHTTPOptionLocation(u string) HTTPOption {
 // WithHTTPOptionUserAgent overrides the User-Agent sent by these helpers.
 func WithHTTPOptionUserAgent(ua string) HTTPOption {
 	return func(h *httpConfig) { h.userAgent = ua }
+}
+
+// WithHTTPOptionAuth attaches sessionid / sessionid_sign cookies to
+// outgoing helper requests so account entitlements apply (real-time
+// quotes on paid US-equity feeds, etc.). signature may be empty for
+// legacy free accounts. Has no effect on GetUser, which takes cookies
+// positionally.
+func WithHTTPOptionAuth(sessionID, signature string) HTTPOption {
+	return func(h *httpConfig) {
+		h.sessionID = sessionID
+		h.sessionIDSign = signature
+	}
 }
 
 // Unexported test hooks for host overrides.
@@ -186,6 +200,9 @@ func SearchSymbol(ctx context.Context, query string, opts ...HTTPOption) ([]Symb
 	req.Header.Set("Referer", "https://www.tradingview.com/")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	if cfg.sessionID != "" {
+		req.Header.Set("Cookie", authCookieHeader(cfg.sessionID, cfg.sessionIDSign))
+	}
 
 	resp, err := cfg.client.Do(req)
 	if err != nil {
@@ -310,6 +327,9 @@ func GetTA(ctx context.Context, fullSymbol string, opts ...HTTPOption) (TAResult
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", cfg.userAgent)
+	if cfg.sessionID != "" {
+		req.Header.Set("Cookie", authCookieHeader(cfg.sessionID, cfg.sessionIDSign))
+	}
 
 	resp, err := cfg.client.Do(req)
 	if err != nil {
