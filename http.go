@@ -369,3 +369,88 @@ func GetTA(ctx context.Context, fullSymbol string, opts ...HTTPOption) (TAResult
 	}
 	return out, nil
 }
+
+// Scan posts a multi-symbol, multi-column query to TradingView's
+// scanner endpoint and decodes the response into a map keyed by
+// (returned-ticker, column).
+//
+// columns are TradingView screener column ids reverse-engineered from
+// the web client; common ones include "ATR", "RSI", "MACD.macd",
+// "Recommend.All", "average_volume_30d_calc". Append a "|<timeframe>"
+// suffix for non-default timeframes (e.g. "ATR|60" for the
+// 60-minute ATR; the bare id is the daily value). Column names are not
+// officially documented; verify against your account before relying.
+//
+// Pass WithHTTPOptionAuth to use entitled (real-time) data on paid
+// markets. Without it the helper goes anonymous, which silently
+// demotes paid users to delayed feeds for entitled exchanges.
+//
+// Symbols missing from the response are absent from the result;
+// individual columns the server returns null for are absent from the
+// per-symbol map (vs. silently zero).
+func Scan(ctx context.Context, symbols, columns []string, opts ...HTTPOption) (map[string]map[string]float64, error) {
+	cfg := defaultHTTPConfig()
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	body, err := json.Marshal(struct {
+		Symbols struct {
+			Tickers []string `json:"tickers"`
+		} `json:"symbols"`
+		Columns []string `json:"columns"`
+	}{
+		Symbols: struct {
+			Tickers []string `json:"tickers"`
+		}{Tickers: symbols},
+		Columns: columns,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.scannerBase+"/global/scan", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", cfg.userAgent)
+	if cfg.sessionID != "" {
+		req.Header.Set("Cookie", authCookieHeader(cfg.sessionID, cfg.sessionIDSign))
+	}
+
+	resp, err := cfg.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("tradingview: scanner: %s", resp.Status)
+	}
+
+	var payload struct {
+		Data []struct {
+			S string     `json:"s"`
+			D []*float64 `json:"d"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("tradingview: decode scanner: %w", err)
+	}
+
+	out := make(map[string]map[string]float64, len(payload.Data))
+	for _, row := range payload.Data {
+		if len(row.D) != len(columns) {
+			return nil, fmt.Errorf("tradingview: scanner: column count mismatch for %q (got %d, want %d)", row.S, len(row.D), len(columns))
+		}
+		m := make(map[string]float64, len(columns))
+		for i, col := range columns {
+			if row.D[i] == nil {
+				continue
+			}
+			m[col] = *row.D[i]
+		}
+		out[row.S] = m
+	}
+	return out, nil
+}
