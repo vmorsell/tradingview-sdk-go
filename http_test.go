@@ -373,6 +373,27 @@ func TestScanRejectsColumnCountMismatch(t *testing.T) {
 	}
 }
 
+func TestScanIncludesBodyOn4xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"unknown column ATR_BOGUS"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := Scan(t.Context(),
+		[]string{"X:Y"},
+		[]string{"ATR_BOGUS"},
+		withScannerBase(srv.URL),
+		WithHTTPOptionClient(srv.Client()),
+	)
+	if err == nil {
+		t.Fatal("want error on 4xx")
+	}
+	if !strings.Contains(err.Error(), "unknown column ATR_BOGUS") {
+		t.Errorf("error should include response body, got: %v", err)
+	}
+}
+
 func TestScanAttachesCookieWhenAuthSet(t *testing.T) {
 	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

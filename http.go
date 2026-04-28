@@ -424,8 +424,12 @@ func Scan(ctx context.Context, symbols, columns []string, opts ...HTTPOption) (m
 		return nil, err
 	}
 	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("tradingview: scanner: %s", resp.Status)
+		return nil, fmt.Errorf("tradingview: scanner: %s (body: %s)", resp.Status, firstChars(respBody, 200))
 	}
 
 	var payload struct {
@@ -434,7 +438,7 @@ func Scan(ctx context.Context, symbols, columns []string, opts ...HTTPOption) (m
 			D []*float64 `json:"d"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(respBody, &payload); err != nil {
 		return nil, fmt.Errorf("tradingview: decode scanner: %w", err)
 	}
 
