@@ -128,6 +128,29 @@ fmt.Printf("%s 1D all=%+.2f ma=%+.2f other=%+.2f\n",
     results[0].ID, d.All, d.MA, d.Other)
 ```
 
+## Scanner
+
+`Scan` is the generic primitive over the screener endpoint, useful when you want a column TradingView exposes but this SDK doesn't have a typed helper for. Pass any screener column ids and any symbols; you get back `map[ticker]map[column]float64`. Append `|<timeframe>` (e.g. `ATR|60`) for non-default timeframes.
+
+```go
+rows, err := tradingview.Scan(ctx,
+    []string{"NASDAQ:AAPL", "NASDAQ:MSFT"},
+    []string{"ATR", "average_volume_30d_calc", "RSI"},
+    tradingview.WithHTTPOptionAuth(
+        os.Getenv("TV_SESSIONID"),
+        os.Getenv("TV_SESSIONID_SIGN"),
+    ),
+)
+if err != nil {
+    log.Fatal(err)
+}
+for sym, cols := range rows {
+    fmt.Printf("%s ATR=%.2f RSI=%.1f\n", sym, cols["ATR"], cols["RSI"])
+}
+```
+
+Column ids are reverse-engineered from the web client's screener and are not officially documented; verify against your account before relying on a name.
+
 ## Authenticated use
 
 Paid-plan features need a browser session cookie. Pull `sessionid` and `sessionid_sign` from your logged-in TradingView tab:

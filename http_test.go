@@ -270,3 +270,149 @@ func TestGetTANoCookieByDefault(t *testing.T) {
 		t.Errorf("Cookie should be empty without WithHTTPOptionAuth, got %q", got)
 	}
 }
+
+func TestScanDecodesMultiSymbol(t *testing.T) {
+	var captured struct {
+		Tickers []string
+		Columns []string
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/global/scan" {
+			t.Errorf("path: %q", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("method: %q", r.Method)
+		}
+		raw, _ := io.ReadAll(r.Body)
+		var req struct {
+			Symbols struct {
+				Tickers []string `json:"tickers"`
+			} `json:"symbols"`
+			Columns []string `json:"columns"`
+		}
+		if err := json.Unmarshal(raw, &req); err != nil {
+			t.Fatal(err)
+		}
+		captured.Tickers = req.Symbols.Tickers
+		captured.Columns = req.Columns
+		_, _ = w.Write([]byte(`{"data":[
+			{"s":"BINANCE:BTCUSDT","d":[1234.5, 65.7]},
+			{"s":"NASDAQ:AAPL","d":[2.1, 55.0]}
+		]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	got, err := Scan(t.Context(),
+		[]string{"BINANCE:BTCUSDT", "NASDAQ:AAPL"},
+		[]string{"ATR", "RSI"},
+		withScannerBase(srv.URL),
+		WithHTTPOptionClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(captured.Tickers) != 2 || captured.Tickers[1] != "NASDAQ:AAPL" {
+		t.Errorf("request tickers: %v", captured.Tickers)
+	}
+	if len(captured.Columns) != 2 || captured.Columns[0] != "ATR" {
+		t.Errorf("request columns: %v", captured.Columns)
+	}
+	if v := got["BINANCE:BTCUSDT"]["ATR"]; v != 1234.5 {
+		t.Errorf("BTC ATR: %v", v)
+	}
+	if v := got["NASDAQ:AAPL"]["RSI"]; v != 55.0 {
+		t.Errorf("AAPL RSI: %v", v)
+	}
+}
+
+func TestScanOmitsNullColumns(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"s":"NASDAQ:FOO","d":[null, 42.0]}]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	got, err := Scan(t.Context(),
+		[]string{"NASDAQ:FOO"},
+		[]string{"ATR", "RSI"},
+		withScannerBase(srv.URL),
+		WithHTTPOptionClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, ok := got["NASDAQ:FOO"]
+	if !ok {
+		t.Fatal("symbol missing from result")
+	}
+	if _, present := row["ATR"]; present {
+		t.Error("ATR should be absent (server returned null)")
+	}
+	if v := row["RSI"]; v != 42.0 {
+		t.Errorf("RSI: %v", v)
+	}
+}
+
+func TestScanRejectsColumnCountMismatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Request asked for 2 columns; server returns 3 values.
+		_, _ = w.Write([]byte(`{"data":[{"s":"X:Y","d":[1.0, 2.0, 3.0]}]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := Scan(t.Context(),
+		[]string{"X:Y"},
+		[]string{"ATR", "RSI"},
+		withScannerBase(srv.URL),
+		WithHTTPOptionClient(srv.Client()),
+	)
+	if err == nil {
+		t.Fatal("want error on column count mismatch")
+	}
+	if !strings.Contains(err.Error(), "column count mismatch") {
+		t.Errorf("error message: %v", err)
+	}
+}
+
+func TestScanIncludesBodyOn4xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"unknown column ATR_BOGUS"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := Scan(t.Context(),
+		[]string{"X:Y"},
+		[]string{"ATR_BOGUS"},
+		withScannerBase(srv.URL),
+		WithHTTPOptionClient(srv.Client()),
+	)
+	if err == nil {
+		t.Fatal("want error on 4xx")
+	}
+	if !strings.Contains(err.Error(), "unknown column ATR_BOGUS") {
+		t.Errorf("error should include response body, got: %v", err)
+	}
+}
+
+func TestScanAttachesCookieWhenAuthSet(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Cookie")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := Scan(t.Context(),
+		[]string{"X:Y"},
+		[]string{"ATR"},
+		withScannerBase(srv.URL),
+		WithHTTPOptionClient(srv.Client()),
+		WithHTTPOptionAuth("sid-value", "sig-value"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "sessionid=sid-value;sessionid_sign=sig-value" {
+		t.Errorf("Cookie: %q", got)
+	}
+}
