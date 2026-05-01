@@ -214,14 +214,14 @@ func SearchSymbol(ctx context.Context, query string, opts ...HTTPOption) ([]Symb
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("tradingview: search_symbol: %s (body: %s)", resp.Status, firstChars(body, 200))
+		return nil, fmt.Errorf("tradingview: search_symbol: %s (body: %s)", resp.Status, firstChars(body))
 	}
 	// Content-Type on this endpoint is unreliable (TradingView sometimes
 	// serves JSON as text/plain), so check the body directly. A leading '<'
 	// almost always means we got an HTML challenge or redirect page back.
 	trimmed := strings.TrimSpace(string(body))
 	if strings.HasPrefix(trimmed, "<") {
-		return nil, fmt.Errorf("tradingview: search_symbol: non-JSON response (body: %s)", firstChars(body, 200))
+		return nil, fmt.Errorf("tradingview: search_symbol: non-JSON response (body: %s)", firstChars(body))
 	}
 	var payload struct {
 		Symbols []struct {
@@ -233,7 +233,7 @@ func SearchSymbol(ctx context.Context, query string, opts ...HTTPOption) ([]Symb
 		} `json:"symbols"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, fmt.Errorf("tradingview: decode search: %w (body: %s)", err, firstChars(body, 200))
+		return nil, fmt.Errorf("tradingview: decode search: %w (body: %s)", err, firstChars(body))
 	}
 	out := make([]SymbolSearchResult, 0, len(payload.Symbols))
 	for _, s := range payload.Symbols {
@@ -254,7 +254,10 @@ func SearchSymbol(ctx context.Context, query string, opts ...HTTPOption) ([]Symb
 	return out, nil
 }
 
-func firstChars(b []byte, n int) string {
+// firstChars returns up to 200 leading non-whitespace characters of b
+// for embedding in error messages.
+func firstChars(b []byte) string {
+	const n = 200
 	s := strings.TrimSpace(string(b))
 	if len(s) <= n {
 		return s
@@ -429,7 +432,7 @@ func Scan(ctx context.Context, symbols, columns []string, opts ...HTTPOption) (m
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("tradingview: scanner: %s (body: %s)", resp.Status, firstChars(respBody, 200))
+		return nil, fmt.Errorf("tradingview: scanner: %s (body: %s)", resp.Status, firstChars(respBody))
 	}
 
 	var payload struct {
