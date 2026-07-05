@@ -169,6 +169,82 @@ func TestHeartbeatEcho(t *testing.T) {
 	}
 }
 
+// waitClosed asserts that ch closes within 2s.
+func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("%s did not close", what)
+	}
+}
+
+func TestClientCloseTearsDownSessions(t *testing.T) {
+	f := newFakeServer(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	client, err := Connect(ctx,
+		WithDialer(f.dialer()),
+		withURL(strings.Replace(f.srv.URL, "http://", "ws://", 1)),
+	)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	_ = f.acceptConn(t)
+
+	qs, err := client.NewQuoteSession()
+	if err != nil {
+		t.Fatalf("quote session: %v", err)
+	}
+	cs, err := client.NewChartSession()
+	if err != nil {
+		t.Fatalf("chart session: %v", err)
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	waitClosed(t, qs.Done(), "quote session Done")
+	waitClosed(t, cs.Done(), "chart session Done")
+	if _, ok := <-qs.Updates(); ok {
+		t.Fatal("quote Updates not closed after client close")
+	}
+	if _, ok := <-cs.Updates(); ok {
+		t.Fatal("chart Updates not closed after client close")
+	}
+}
+
+func TestServerDropTearsDownSessions(t *testing.T) {
+	f := newFakeServer(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	client, err := Connect(ctx,
+		WithDialer(f.dialer()),
+		withURL(strings.Replace(f.srv.URL, "http://", "ws://", 1)),
+	)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	conn := f.acceptConn(t)
+
+	qs, err := client.NewQuoteSession()
+	if err != nil {
+		t.Fatalf("quote session: %v", err)
+	}
+
+	// Hard-drop the connection from the server side.
+	_ = conn.Close()
+
+	waitClosed(t, client.Done(), "client Done")
+	waitClosed(t, qs.Done(), "quote session Done")
+	if _, ok := <-qs.Updates(); ok {
+		t.Fatal("quote Updates not closed after connection drop")
+	}
+}
+
 func TestCloseIsIdempotentAndDoneFires(t *testing.T) {
 	f := newFakeServer(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)

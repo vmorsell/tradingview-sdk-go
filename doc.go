@@ -27,6 +27,13 @@
 // See the examples/ directory for runnable programs covering quote
 // streaming, chart streaming, and symbol search.
 //
+// # Lifecycle
+//
+// The SDK does not reconnect automatically. When the connection dies
+// (server close, network error, or heartbeat silence), every session's
+// Updates channel is closed and Client.Done fires; Client.Err reports
+// the cause. To recover, build a new Client with Connect.
+//
 // # Scope
 //
 // v0.1 implements the core streaming primitives (quotes, charts) and three

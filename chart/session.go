@@ -17,6 +17,7 @@ type Bridge interface {
 	Send(method string, params ...any) error
 	Register(sessionID string, h func(env protocol.Envelope))
 	Unregister(sessionID string)
+	Done() <-chan struct{}
 }
 
 // Session hosts one chart. A Client may open many of them; each shows
@@ -27,9 +28,9 @@ type Session struct {
 
 	updates chan Update
 	done    chan struct{}
-	closeCh chan struct{}
 
 	mu            sync.Mutex
+	closed        bool // guards updates against send-after-close
 	info          MarketInfo
 	seriesCreated bool
 	currentSerIdx int
@@ -51,7 +52,6 @@ func New(bridge Bridge, opts ...Option) (*Session, error) {
 		bridge:  bridge,
 		updates: make(chan Update, cfg.bufferSize),
 		done:    make(chan struct{}),
-		closeCh: make(chan struct{}),
 	}
 	bridge.Register(s.id, s.handle)
 
@@ -65,7 +65,18 @@ func New(bridge Bridge, opts ...Option) (*Session, error) {
 			return nil, err
 		}
 	}
+	go s.watchBridge()
 	return s, nil
+}
+
+// watchBridge tears the session down when the owning client dies, so
+// Updates closes and Done fires even if nobody calls Close explicitly.
+func (s *Session) watchBridge() {
+	select {
+	case <-s.bridge.Done():
+		_ = s.shutdown(false)
+	case <-s.done:
+	}
 }
 
 // SetMarket resolves a symbol and begins streaming its candles.
@@ -79,11 +90,6 @@ func (s *Session) SetMarket(symbol string, opts ...MarketOption) error {
 	for _, o := range opts {
 		o(mc)
 	}
-
-	s.mu.Lock()
-	s.currentSerIdx++
-	serIdx := s.currentSerIdx
-	s.mu.Unlock()
 
 	symInit := map[string]any{
 		"symbol":     symbol,
@@ -100,10 +106,17 @@ func (s *Session) SetMarket(symbol string, opts ...MarketOption) error {
 	if b, err := json.Marshal(symInit); err == nil {
 		symKey += string(b)
 	}
+
+	// Hold the lock across both sends so concurrent SetMarket calls
+	// can't interleave resolve/create frames on the wire.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.currentSerIdx++
+	serIdx := s.currentSerIdx
 	if err := s.bridge.Send("resolve_symbol", s.id, fmt.Sprintf("ser_%d", serIdx), symKey); err != nil {
 		return err
 	}
-	return s.setSeriesLocked(mc.timeframe, mc.numCandles, mc.to, serIdx)
+	return s.sendSeriesLocked(mc.timeframe, mc.numCandles, mc.to, serIdx)
 }
 
 // SetSeries changes the timeframe or candle count without re-resolving
@@ -115,22 +128,21 @@ func (s *Session) SetSeries(timeframe string, opts ...MarketOption) error {
 	}
 
 	s.mu.Lock()
-	serIdx := s.currentSerIdx
-	s.mu.Unlock()
-	if serIdx == 0 {
+	defer s.mu.Unlock()
+	if s.currentSerIdx == 0 {
 		return errors.New("chart: SetMarket must be called before SetSeries")
 	}
-	return s.setSeriesLocked(mc.timeframe, mc.numCandles, mc.to, serIdx)
+	return s.sendSeriesLocked(mc.timeframe, mc.numCandles, mc.to, s.currentSerIdx)
 }
 
-func (s *Session) setSeriesLocked(timeframe string, numCandles int, to int64, serIdx int) error {
+// sendSeriesLocked sends a create_series or modify_series frame. The
+// caller must hold s.mu.
+func (s *Session) sendSeriesLocked(timeframe string, numCandles int, to int64, serIdx int) error {
 	method := "create_series"
-	s.mu.Lock()
 	if s.seriesCreated {
 		method = "modify_series"
 	}
 	s.seriesCreated = true
-	s.mu.Unlock()
 
 	var rangeArg any = numCandles
 	if to > 0 {
@@ -174,51 +186,53 @@ func (s *Session) Info() MarketInfo {
 	return s.info
 }
 
-// Updates returns the event stream for this session. Closed on shutdown.
+// Updates returns the event stream for this session. The channel is
+// closed when the session is closed or the owning client shuts down
+// (including on connection loss).
 func (s *Session) Updates() <-chan Update { return s.updates }
 
 // Done fires when the session has fully torn down.
 func (s *Session) Done() <-chan struct{} { return s.done }
 
-// DroppedUpdates reports how many Candles updates have been evicted
-// under backpressure. Errors and SymbolResolved are never counted.
+// DroppedUpdates reports how many pending updates have been evicted
+// under backpressure since the session was created.
 func (s *Session) DroppedUpdates() uint64 { return s.dropped.Load() }
 
 // Close asks TradingView to release the session and closes the Updates
 // channel. Idempotent.
-func (s *Session) Close() error {
-	var firstErr error
+func (s *Session) Close() error { return s.shutdown(true) }
+
+// shutdown tears the session down exactly once. notifyServer is false
+// when the client itself is dying and the connection is unusable.
+func (s *Session) shutdown(notifyServer bool) error {
+	var sendErr error
 	s.closeOnce.Do(func() {
-		close(s.closeCh)
-		if err := s.bridge.Send("chart_delete_session", s.id); err != nil {
-			firstErr = err
+		if notifyServer {
+			sendErr = s.bridge.Send("chart_delete_session", s.id)
 		}
 		s.bridge.Unregister(s.id)
+		s.mu.Lock()
+		s.closed = true
 		close(s.updates)
+		s.mu.Unlock()
 		close(s.done)
 	})
-	return firstErr
+	return sendErr
 }
 
 // handle dispatches one envelope.
 func (s *Session) handle(env protocol.Envelope) {
-	select {
-	case <-s.closeCh:
-		return
-	default:
-	}
-
 	switch env.Method {
 	case "symbol_resolved":
 		s.handleSymbolResolved(env)
 	case "timescale_update", "du":
 		s.handleTimescale(env)
 	case "symbol_error":
-		s.priorityEmit(ChartError{Kind: "symbol_error", Err: serverErr(env)})
+		s.emit(ChartError{Kind: "symbol_error", Err: serverErr(env)})
 	case "series_error":
-		s.priorityEmit(ChartError{Kind: "series_error", Err: serverErr(env)})
+		s.emit(ChartError{Kind: "series_error", Err: serverErr(env)})
 	case "critical_error":
-		s.priorityEmit(ChartError{Kind: "critical_error", Err: serverErr(env)})
+		s.emit(ChartError{Kind: "critical_error", Err: serverErr(env)})
 	}
 }
 
@@ -266,7 +280,7 @@ func (s *Session) handleSymbolResolved(env protocol.Envelope) {
 	s.mu.Lock()
 	s.info = info
 	s.mu.Unlock()
-	s.priorityEmit(SymbolResolved{Info: info})
+	s.emit(SymbolResolved{Info: info})
 }
 
 // handleTimescale decodes a timescale_update or du payload.
@@ -313,30 +327,21 @@ func serverErr(env protocol.Envelope) error {
 	return fmt.Errorf("%v", parts)
 }
 
+// emit delivers u with drop-oldest backpressure: when the buffer is
+// full, the oldest pending update is evicted (counted in DroppedUpdates)
+// to make room. No-op once the session has shut down.
 func (s *Session) emit(u Update) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
 	select {
 	case s.updates <- u:
 		return
 	default:
 	}
-	select {
-	case <-s.updates:
-		s.dropped.Add(1)
-	default:
-	}
-	select {
-	case s.updates <- u:
-	default:
-		s.dropped.Add(1)
-	}
-}
-
-func (s *Session) priorityEmit(u Update) {
-	select {
-	case s.updates <- u:
-		return
-	default:
-	}
+	// Channel is full. Evict the oldest entry and try again.
 	select {
 	case <-s.updates:
 		s.dropped.Add(1)

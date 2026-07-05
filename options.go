@@ -31,7 +31,7 @@ func defaultConfig() *config {
 		location:  "https://www.tradingview.com/",
 		userAgent: "Mozilla/5.0 (compatible; tradingview-sdk-go/0.1)",
 		headers:   http.Header{},
-		logger:    slog.New(slog.NewTextHandler(discardWriter{}, nil)),
+		logger:    slog.New(slog.DiscardHandler),
 		dialer:    websocket.DefaultDialer,
 		httpClient: &http.Client{
 			// TradingView auth page follows a chain of redirects we parse manually.
@@ -79,8 +79,3 @@ func WithHTTPClient(h *http.Client) Option { return func(c *config) { c.httpClie
 
 // withURL is an unexported test hook that bypasses URL construction.
 func withURL(u string) Option { return func(c *config) { c.urlOverride = u } }
-
-// discardWriter satisfies io.Writer for the default no-op slog handler.
-type discardWriter struct{}
-
-func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }

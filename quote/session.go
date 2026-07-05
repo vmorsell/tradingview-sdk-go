@@ -21,6 +21,7 @@ type Bridge interface {
 	Send(method string, params ...any) error
 	Register(sessionID string, h func(env protocol.Envelope))
 	Unregister(sessionID string)
+	Done() <-chan struct{}
 }
 
 // Option configures a Session at construction time.
@@ -45,8 +46,8 @@ func WithCustomFields(fs ...Field) Option {
 }
 
 // WithBufferSize sets the capacity of the Updates channel (default 64).
-// Raise this for chatty symbols or slow consumers; see the drop-oldest
-// behaviour documented on Session.DroppedUpdates.
+// Raise this for chatty symbols or slow consumers; when the buffer is
+// full the oldest pending update is evicted (see Session.DroppedUpdates).
 func WithBufferSize(n int) Option {
 	return func(c *config) { c.bufferSize = n }
 }
@@ -59,9 +60,9 @@ type Session struct {
 
 	updates chan Update
 	done    chan struct{}
-	closeCh chan struct{}
 
 	mu        sync.Mutex
+	closed    bool                     // guards updates against send-after-close
 	state     map[string]map[Field]any // accumulated last value per symbol
 	subscribe map[string]struct{}      // symbolKey -> subscribed flag
 
@@ -89,7 +90,6 @@ func New(bridge Bridge, opts ...Option) (*Session, error) {
 		bridge:    bridge,
 		updates:   make(chan Update, cfg.bufferSize),
 		done:      make(chan struct{}),
-		closeCh:   make(chan struct{}),
 		state:     map[string]map[Field]any{},
 		subscribe: map[string]struct{}{},
 	}
@@ -108,7 +108,18 @@ func New(bridge Bridge, opts ...Option) (*Session, error) {
 		bridge.Unregister(s.id)
 		return nil, err
 	}
+	go s.watchBridge()
 	return s, nil
+}
+
+// watchBridge tears the session down when the owning client dies, so
+// Updates closes and Done fires even if nobody calls Close explicitly.
+func (s *Session) watchBridge() {
+	select {
+	case <-s.bridge.Done():
+		_ = s.shutdown(false)
+	case <-s.done:
+	}
 }
 
 // AddSymbol subscribes to a symbol on this session. Repeated calls with
@@ -145,41 +156,41 @@ func (s *Session) RemoveSymbol(symbol string, kind SessionKind) error {
 }
 
 // Updates returns the single event stream for this session. The channel
-// is closed when the session (or its client) shuts down.
+// is closed when the session is closed or the owning client shuts down
+// (including on connection loss).
 func (s *Session) Updates() <-chan Update { return s.updates }
 
 // Done fires once the session is fully torn down.
 func (s *Session) Done() <-chan struct{} { return s.done }
 
-// DroppedUpdates reports how many data updates have been evicted under
-// backpressure since the session was created. QuoteError and
-// QuoteCompleted are delivered via a priority path and never count.
+// DroppedUpdates reports how many pending updates have been evicted
+// under backpressure since the session was created.
 func (s *Session) DroppedUpdates() uint64 { return s.dropped.Load() }
 
 // Close asks TradingView to release the session and closes the Updates
 // channel. Idempotent; safe to call from any goroutine.
-func (s *Session) Close() error {
-	var firstErr error
+func (s *Session) Close() error { return s.shutdown(true) }
+
+// shutdown tears the session down exactly once. notifyServer is false
+// when the client itself is dying and the connection is unusable.
+func (s *Session) shutdown(notifyServer bool) error {
+	var sendErr error
 	s.closeOnce.Do(func() {
-		close(s.closeCh)
-		if err := s.bridge.Send("quote_delete_session", s.id); err != nil {
-			firstErr = err
+		if notifyServer {
+			sendErr = s.bridge.Send("quote_delete_session", s.id)
 		}
 		s.bridge.Unregister(s.id)
+		s.mu.Lock()
+		s.closed = true
 		close(s.updates)
+		s.mu.Unlock()
 		close(s.done)
 	})
-	return firstErr
+	return sendErr
 }
 
 // handle runs on the dispatcher goroutine.
 func (s *Session) handle(env protocol.Envelope) {
-	select {
-	case <-s.closeCh:
-		return
-	default:
-	}
-
 	switch env.Method {
 	case "qsd":
 		s.handleQSD(env)
@@ -208,7 +219,7 @@ func (s *Session) handleQSD(env protocol.Envelope) {
 	symbol := parseSymbolFromKey(payload.N)
 
 	if payload.S == "error" {
-		s.priorityEmit(QuoteError{Symbol: symbol, Err: errors.New("quote error")})
+		s.emit(QuoteError{Symbol: symbol, Err: fmt.Errorf("%w: %s", ErrQuoteServer, payload.V)})
 		return
 	}
 
@@ -239,12 +250,10 @@ func (s *Session) handleCompleted(env protocol.Envelope) {
 	if err := json.Unmarshal(env.Params[1], &key); err != nil {
 		return
 	}
-	s.priorityEmit(QuoteCompleted{Symbol: parseSymbolFromKey(key)})
+	s.emit(QuoteCompleted{Symbol: parseSymbolFromKey(key)})
 }
 
 func (s *Session) handleError(env protocol.Envelope) {
-	// quote_error carries per-symbol context. Route it through the
-	// priority path so slow consumers still see it.
 	sym := ""
 	if len(env.Params) >= 2 {
 		var key string
@@ -252,40 +261,29 @@ func (s *Session) handleError(env protocol.Envelope) {
 			sym = parseSymbolFromKey(key)
 		}
 	}
-	s.priorityEmit(QuoteError{Symbol: sym, Err: fmt.Errorf("%w: %v", ErrQuoteServer, env.Params)})
+	// Params are raw JSON; render them as text so the error is readable.
+	parts := make([]string, 0, len(env.Params))
+	for _, p := range env.Params {
+		parts = append(parts, string(p))
+	}
+	s.emit(QuoteError{Symbol: sym, Err: fmt.Errorf("%w: %v", ErrQuoteServer, parts)})
 }
 
-// emit pushes a data update with drop-oldest backpressure. Each eviction
-// increments the drop counter so callers can observe sustained pressure.
+// emit delivers u with drop-oldest backpressure: when the buffer is
+// full, the oldest pending update is evicted (counted in DroppedUpdates)
+// to make room. No-op once the session has shut down.
 func (s *Session) emit(u Update) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
 	select {
 	case s.updates <- u:
 		return
 	default:
 	}
 	// Channel is full. Evict the oldest entry and try again.
-	select {
-	case <-s.updates:
-		s.dropped.Add(1)
-	default:
-	}
-	select {
-	case s.updates <- u:
-	default:
-		// Lost a race with another writer or with Close.
-		s.dropped.Add(1)
-	}
-}
-
-// priorityEmit delivers an error or completed update. It still respects
-// the channel's capacity but evicts a data update to make room rather
-// than dropping the priority event itself.
-func (s *Session) priorityEmit(u Update) {
-	select {
-	case s.updates <- u:
-		return
-	default:
-	}
 	select {
 	case <-s.updates:
 		s.dropped.Add(1)

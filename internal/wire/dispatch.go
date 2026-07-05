@@ -7,7 +7,6 @@
 package wire
 
 import (
-	"maps"
 	"sync"
 
 	"github.com/vmorsell/tradingview-sdk-go/internal/protocol"
@@ -46,14 +45,4 @@ func (r *Registry) Lookup(id string) (Handler, bool) {
 	h, ok := r.handlers[id]
 	r.mu.RUnlock()
 	return h, ok
-}
-
-// Snapshot returns a copy of the current id→handler map. Used by Client.Close
-// to close every session's updates channel.
-func (r *Registry) Snapshot() map[string]Handler {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make(map[string]Handler, len(r.handlers))
-	maps.Copy(out, r.handlers)
-	return out
 }

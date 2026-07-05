@@ -227,6 +227,25 @@ func TestGetTAShapesResponse(t *testing.T) {
 	}
 }
 
+func TestGetTASurfacesHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("access denied"))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := GetTA(t.Context(), "BINANCE:BTCUSDT",
+		withScannerBase(srv.URL),
+		WithHTTPOptionClient(srv.Client()),
+	)
+	if err == nil {
+		t.Fatal("want error on 403")
+	}
+	if !strings.Contains(err.Error(), "403") || !strings.Contains(err.Error(), "access denied") {
+		t.Errorf("error should carry status and body snippet: %v", err)
+	}
+}
+
 func TestGetTAAttachesCookieWhenAuthSet(t *testing.T) {
 	body := fixture(t, "scanner_ta.json")
 	var got string

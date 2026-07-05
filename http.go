@@ -9,8 +9,42 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 )
+
+// Compiled regexes used by the GetUser auth scrape. Kept at package
+// scope so they are compiled once on program start.
+var (
+	reID          = regexp.MustCompile(`"id":(\d{1,10})`)
+	reUsername    = regexp.MustCompile(`"username":"(.*?)"`)
+	reAuthToken   = regexp.MustCompile(`"auth_token":"(.*?)"`)
+	reSessionHash = regexp.MustCompile(`"session_hash":"(.*?)"`)
+	rePrivateChan = regexp.MustCompile(`"private_channel":"(.*?)"`)
+)
+
+func containsAuthToken(s string) bool { return reAuthToken.MatchString(s) }
+
+func firstGroup(m []string) string {
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
+}
+
+func parseInt(m []string) int64 {
+	if len(m) < 2 {
+		return 0
+	}
+	var n int64
+	for _, r := range m[1] {
+		if r < '0' || r > '9' {
+			return 0
+		}
+		n = n*10 + int64(r-'0')
+	}
+	return n
+}
 
 const (
 	defaultSearchBase  = "https://symbol-search.tradingview.com"
@@ -339,15 +373,19 @@ func GetTA(ctx context.Context, fullSymbol string, opts ...HTTPOption) (TAResult
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 500 {
-		return nil, fmt.Errorf("tradingview: scanner: %s", resp.Status)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("tradingview: scanner: %s (body: %s)", resp.Status, firstChars(respBody))
 	}
 	var payload struct {
 		Data []struct {
 			D []float64 `json:"d"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(respBody, &payload); err != nil {
 		return nil, fmt.Errorf("tradingview: decode scanner: %w", err)
 	}
 	if len(payload.Data) == 0 || len(payload.Data[0].D) != len(cols) {

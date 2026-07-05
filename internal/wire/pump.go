@@ -31,13 +31,25 @@ type Conn interface {
 // packets that arrive before a session is registered.
 type UnsolicitedHandler func(env protocol.Envelope)
 
+const (
+	// defaultReadTimeout bounds how long the reader waits for any frame.
+	// TradingView heartbeats every few seconds, so a healthy connection
+	// never comes close; hitting it means the peer is dead (e.g. a
+	// half-open TCP connection) and the pump tears down.
+	defaultReadTimeout = 60 * time.Second
+	// writeTimeout bounds a single WriteMessage so a stalled peer can't
+	// wedge the writer goroutine.
+	writeTimeout = 10 * time.Second
+)
+
 // Pump runs the reader, writer, and dispatcher goroutines for one Conn.
 // Construct one per Client lifetime.
 type Pump struct {
-	conn    Conn
-	logger  *slog.Logger
-	reg     *Registry
-	onOther UnsolicitedHandler
+	conn        Conn
+	logger      *slog.Logger
+	reg         *Registry
+	onOther     UnsolicitedHandler
+	readTimeout time.Duration
 
 	sendCh  chan []byte
 	quitCh  chan struct{}
@@ -55,6 +67,8 @@ type Options struct {
 	Registry    *Registry
 	Unsolicited UnsolicitedHandler
 	SendBuffer  int
+	// ReadTimeout overrides defaultReadTimeout; used by tests.
+	ReadTimeout time.Duration
 }
 
 // NewPump wires up a Pump. It does not start any goroutines; call Start
@@ -66,14 +80,18 @@ func NewPump(opts Options) *Pump {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
+	if opts.ReadTimeout <= 0 {
+		opts.ReadTimeout = defaultReadTimeout
+	}
 	return &Pump{
-		conn:    opts.Conn,
-		logger:  opts.Logger,
-		reg:     opts.Registry,
-		onOther: opts.Unsolicited,
-		sendCh:  make(chan []byte, opts.SendBuffer),
-		quitCh:  make(chan struct{}),
-		doneCh:  make(chan struct{}),
+		conn:        opts.Conn,
+		logger:      opts.Logger,
+		reg:         opts.Registry,
+		onOther:     opts.Unsolicited,
+		readTimeout: opts.ReadTimeout,
+		sendCh:      make(chan []byte, opts.SendBuffer),
+		quitCh:      make(chan struct{}),
+		doneCh:      make(chan struct{}),
 	}
 }
 
@@ -147,6 +165,7 @@ func (p *Pump) readLoop() {
 	// A server-initiated close must also trigger the writer to exit.
 	defer p.initiateClose()
 	for {
+		_ = p.conn.SetReadDeadline(time.Now().Add(p.readTimeout))
 		_, data, err := p.conn.ReadMessage()
 		if err != nil {
 			if !isExpectedCloseErr(err) {
@@ -196,6 +215,7 @@ func (p *Pump) writeLoop() {
 	for {
 		select {
 		case <-p.quitCh:
+			_ = p.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			_ = p.conn.WriteMessage(
 				websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
@@ -203,6 +223,7 @@ func (p *Pump) writeLoop() {
 			p.drainSend()
 			return
 		case frame := <-p.sendCh:
+			_ = p.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			if err := p.conn.WriteMessage(websocket.TextMessage, frame); err != nil {
 				if !isExpectedCloseErr(err) {
 					p.recordErr(fmt.Errorf("tradingview: write: %w", err))

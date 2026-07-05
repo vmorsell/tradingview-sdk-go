@@ -15,6 +15,7 @@ type fakeBridge struct {
 	sent    []sentFrame
 	handler func(protocol.Envelope)
 	id      string
+	done    chan struct{} // nil means "client never dies"
 }
 
 type sentFrame struct {
@@ -30,14 +31,21 @@ func (b *fakeBridge) Send(method string, params ...any) error {
 }
 
 func (b *fakeBridge) Register(id string, h func(protocol.Envelope)) {
+	b.mu.Lock()
 	b.id = id
 	b.handler = h
+	b.mu.Unlock()
 }
+
 func (b *fakeBridge) Unregister(id string) {
+	b.mu.Lock()
 	if b.id == id {
 		b.handler = nil
 	}
+	b.mu.Unlock()
 }
+
+func (b *fakeBridge) Done() <-chan struct{} { return b.done }
 
 func (b *fakeBridge) sentMethods() []string {
 	b.mu.Lock()
@@ -59,10 +67,13 @@ func (b *fakeBridge) drive(t *testing.T, method string, params ...any) {
 		}
 		raws[i] = raw
 	}
-	if b.handler == nil {
+	b.mu.Lock()
+	h := b.handler
+	b.mu.Unlock()
+	if h == nil {
 		t.Fatal("no handler")
 	}
-	b.handler(protocol.Envelope{Method: method, Params: raws})
+	h(protocol.Envelope{Method: method, Params: raws})
 }
 
 func TestSessionCreateSendsFrames(t *testing.T) {
@@ -192,6 +203,33 @@ func TestCloseIdempotentAndClosesUpdates(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Updates not closed")
+	}
+}
+
+func TestSessionClosesWhenBridgeDies(t *testing.T) {
+	b := &fakeBridge{done: make(chan struct{})}
+	s, err := New(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	close(b.done) // simulate client/connection death
+
+	select {
+	case <-s.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done did not fire after bridge death")
+	}
+	if _, ok := <-s.Updates(); ok {
+		t.Fatal("Updates not closed after bridge death")
+	}
+	for _, m := range b.sentMethods() {
+		if m == "chart_delete_session" {
+			t.Fatal("sent chart_delete_session on dead connection")
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close after bridge death: %v", err)
 	}
 }
 

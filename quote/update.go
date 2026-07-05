@@ -25,8 +25,7 @@ type QuoteCompleted struct {
 func (QuoteCompleted) isQuoteUpdate() {}
 
 // QuoteError reports a per-symbol failure such as an unknown ticker or a
-// permission denial. Errors go through a priority path and are not dropped
-// by the backpressure policy unless the session is closing.
+// permission denial.
 type QuoteError struct {
 	Symbol string
 	Err    error

@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
 
 	"github.com/vmorsell/tradingview-sdk-go/chart"
 	"github.com/vmorsell/tradingview-sdk-go/internal/protocol"
@@ -114,7 +113,8 @@ func Connect(ctx context.Context, opts ...Option) (*Client, error) {
 }
 
 // Close starts graceful shutdown and blocks until the pump goroutines
-// exit. Idempotent.
+// exit. Sessions opened on this client observe the shutdown and close
+// their Updates channels shortly after. Idempotent.
 func (c *Client) Close() error { return c.pump.Close() }
 
 // Done closes once the underlying connection has fully torn down.
@@ -167,37 +167,4 @@ func cloneHeader(h http.Header) http.Header {
 		out[k] = vv
 	}
 	return out
-}
-
-// Compiled regexes used by the HTTP-side auth scrape. Kept at package
-// scope so they are compiled once on program start.
-var (
-	reID          = regexp.MustCompile(`"id":(\d{1,10})`)
-	reUsername    = regexp.MustCompile(`"username":"(.*?)"`)
-	reAuthToken   = regexp.MustCompile(`"auth_token":"(.*?)"`)
-	reSessionHash = regexp.MustCompile(`"session_hash":"(.*?)"`)
-	rePrivateChan = regexp.MustCompile(`"private_channel":"(.*?)"`)
-)
-
-func containsAuthToken(s string) bool { return reAuthToken.MatchString(s) }
-
-func firstGroup(m []string) string {
-	if len(m) < 2 {
-		return ""
-	}
-	return m[1]
-}
-
-func parseInt(m []string) int64 {
-	if len(m) < 2 {
-		return 0
-	}
-	var n int64
-	for _, r := range m[1] {
-		if r < '0' || r > '9' {
-			return 0
-		}
-		n = n*10 + int64(r-'0')
-	}
-	return n
 }

@@ -46,6 +46,9 @@ func main() {
 			return
 		case u, ok := <-cs.Updates():
 			if !ok {
+				if err := client.Err(); err != nil {
+					log.Fatalf("connection lost: %v", err)
+				}
 				return
 			}
 			switch v := u.(type) {

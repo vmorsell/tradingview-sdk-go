@@ -16,6 +16,7 @@ type fakeBridge struct {
 	sent    []sentFrame
 	handler func(protocol.Envelope)
 	id      string
+	done    chan struct{} // nil means "client never dies"
 }
 
 type sentFrame struct {
@@ -31,15 +32,21 @@ func (b *fakeBridge) Send(method string, params ...any) error {
 }
 
 func (b *fakeBridge) Register(id string, h func(protocol.Envelope)) {
+	b.mu.Lock()
 	b.id = id
 	b.handler = h
+	b.mu.Unlock()
 }
 
 func (b *fakeBridge) Unregister(id string) {
+	b.mu.Lock()
 	if b.id == id {
 		b.handler = nil
 	}
+	b.mu.Unlock()
 }
+
+func (b *fakeBridge) Done() <-chan struct{} { return b.done }
 
 func (b *fakeBridge) sentMethods() []string {
 	b.mu.Lock()
@@ -62,10 +69,13 @@ func (b *fakeBridge) drive(t *testing.T, method string, params ...any) {
 		raws[i] = raw
 	}
 	env := protocol.Envelope{Method: method, Params: raws}
-	if b.handler == nil {
+	b.mu.Lock()
+	h := b.handler
+	b.mu.Unlock()
+	if h == nil {
 		t.Fatal("no handler registered")
 	}
-	b.handler(env)
+	h(env)
 }
 
 func TestSessionCreateEmitsProtocolFrames(t *testing.T) {
@@ -205,6 +215,71 @@ func TestSessionCloseIsIdempotent(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Updates not closed after Close")
 	}
+}
+
+func TestSessionClosesWhenBridgeDies(t *testing.T) {
+	b := &fakeBridge{done: make(chan struct{})}
+	s, err := New(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	close(b.done) // simulate client/connection death
+
+	select {
+	case <-s.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done did not fire after bridge death")
+	}
+	if _, ok := <-s.Updates(); ok {
+		t.Fatal("Updates not closed after bridge death")
+	}
+	// The dead connection must not be sent a delete frame.
+	for _, m := range b.sentMethods() {
+		if m == "quote_delete_session" {
+			t.Fatal("sent quote_delete_session on dead connection")
+		}
+	}
+	// Close afterwards is still safe and error-free.
+	if err := s.Close(); err != nil {
+		t.Fatalf("close after bridge death: %v", err)
+	}
+}
+
+func TestSessionConcurrentEmitAndCloseDoesNotPanic(t *testing.T) {
+	b := &fakeBridge{}
+	s, _ := New(b, WithBufferSize(1))
+
+	env := driveEnv(t, "qsd", s.id, map[string]any{
+		"n": symbolKey("FOO", SessionRegular),
+		"s": "ok",
+		"v": map[string]any{"lp": 1.0},
+	})
+	b.mu.Lock()
+	h := b.handler
+	b.mu.Unlock()
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range 1000 {
+			h(env)
+		}
+	})
+	_ = s.Close()
+	wg.Wait()
+}
+
+func driveEnv(t *testing.T, method string, params ...any) protocol.Envelope {
+	t.Helper()
+	raws := make([]json.RawMessage, len(params))
+	for i, p := range params {
+		raw, err := json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raws[i] = raw
+	}
+	return protocol.Envelope{Method: method, Params: raws}
 }
 
 func recv(t *testing.T, s *Session) Update {

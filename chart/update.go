@@ -22,9 +22,7 @@ type Candles struct {
 func (Candles) isChartUpdate() {}
 
 // ChartError reports a server-side error such as symbol_error,
-// series_error, or critical_error. Like QuoteError in the quote package,
-// it flows through the priority path and is not dropped under normal
-// backpressure.
+// series_error, or critical_error.
 type ChartError struct {
 	Kind string
 	Err  error
